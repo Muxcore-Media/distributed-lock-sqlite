@@ -1,0 +1,16 @@
+{
+  "name": "Distributed Lock SQLite",
+  "description": "SQLite-backed distributed lock provider for cluster-wide coordination",
+  "version": "0.1.0",
+  "author": "MuxCore",
+  "roles": ["infrastructure"],
+  "capabilities": ["distributed.lock"],
+  "contracts": [
+    {
+      "repo": "github.com/Muxcore-Media/core/pkg/contracts",
+      "interface": "DistributedLockProvider",
+      "version": "v0.4.0"
+    }
+  ],
+  "minCoreVersion": "0.4.0"
+}
