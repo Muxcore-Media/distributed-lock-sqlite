@@ -7,8 +7,8 @@ A gRPC sidecar module that provides distributed mutexes using a local SQLite dat
 ## Key Features
 
 - **TTL-based locks** — Locks auto-expire after a configurable duration
-- **Periodic sweeper** — Background goroutine purges expired locks every 10s
-- **Re-acquire support** — Same holder can re-acquire without releasing first
+- **Periodic sweeper** — Background goroutine purges expired locks at `LOCK_SWEEP_INTERVAL` (default 10s)
+- **Re-acquire support** — Same holder can re-acquire without releasing first (issues a new token)
 - **Token-based unlock** — Each lock acquisition returns a unique cryptographically random token required to unlock
 - **Renew API** — Extend a held lock's TTL before it expires
 
@@ -19,11 +19,12 @@ A gRPC sidecar module that provides distributed mutexes using a local SQLite dat
 | `LOCK_GRPC_ADDR` | `:9610` | gRPC listen address |
 | `LOCK_DB_PATH` | `/var/lib/distributed-lock-sqlite/locks.db` | SQLite database path |
 | `LOCK_SWEEP_INTERVAL` | `10s` | Expired lock sweep interval |
+| `MUXCORE_INSECURE_DISABLE_TLS` | unset | Set `true` to disable TLS for the module SDK |
 
 ## Usage
 
 ```bash
-export MUXCORE_GRPC_INSECURE=true
+export MUXCORE_INSECURE_DISABLE_TLS=true
 distributed-lock-sqlite
 ```
 
