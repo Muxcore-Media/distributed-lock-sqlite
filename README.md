@@ -16,7 +16,7 @@ A gRPC sidecar module that provides distributed mutexes using a local SQLite dat
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `LOCK_GRPC_ADDR` | `:9610` | gRPC listen address |
+| `LOCK_GRPC_ADDR` | `:9612` | gRPC listen address |
 | `LOCK_DB_PATH` | `/var/lib/distributed-lock-sqlite/locks.db` | SQLite database path |
 | `LOCK_SWEEP_INTERVAL` | `10s` | Expired lock sweep interval |
 | `MUXCORE_INSECURE_DISABLE_TLS` | unset | Set `true` to disable TLS for the module SDK |
