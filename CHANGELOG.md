@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.3] — 2026-08-10
+
+### Fixed
+
+- Self-hosted CI (`runs-on: self-hosted`; `go test` without `-race` for laptop runners)
+
+### Changed
+
+- `muxcore.json` / `Info()` align `minCoreVersion` and contract pin to **0.5.0** (matches `go.mod` core **v0.5.2**)
+
 ## [0.1.2] — 2026-08-10
 
 ### Added

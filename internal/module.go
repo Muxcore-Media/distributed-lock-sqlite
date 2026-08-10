@@ -80,7 +80,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Distributed Lock SQLite",
-		Version:      "0.1.2",
+		Version:      "0.1.3",
 		Roles:        []string{"infrastructure"},
 		Description:  "SQLite-backed lock provider (single-node; see COMPATIBILITY for shared-volume limits)",
 		Author:       "MuxCore",
@@ -89,10 +89,10 @@ func (m *Module) Info() contracts.ModuleInfo {
 			{
 				Repo:      "github.com/Muxcore-Media/core/pkg/contracts",
 				Interface: "DistributedLockProvider",
-				Version:   "v0.4.0",
+				Version:   "v0.5.0",
 			},
 		},
-		MinCoreVersion: "0.4.0",
+		MinCoreVersion: "0.5.0",
 		HTTPAddr:       m.grpcAddr,
 	}
 }
