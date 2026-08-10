@@ -6,6 +6,19 @@ A gRPC sidecar that implements `DistributedLockProvider` using a local SQLite da
 
 > **Not multi-writer HA.** See [COMPATIBILITY.md](COMPATIBILITY.md) for single-node vs shared-volume vs multi-module limits.
 
+## Single-node expectations
+
+This module is the **laptop / single-host** lock provider:
+
+| Expectation | Detail |
+|-------------|--------|
+| Topology | **One** `distributed-lock-sqlite` process per mesh, `LOCK_DB_PATH` on **local disk** |
+| Coordination | Callers on that mesh dial this module; locks are **not** shared across separate SQLite files |
+| Restart | Rows survive process restart; abandoned holders expire via **TTL + sweeper** |
+| Not supported | Multi-writer HA, multiple lock modules on one DB, or NFS/shared-volume multi-host writers |
+
+For cluster-wide locks, use an external store (Redis `SET NX`, etcd, Postgres advisory locks). Full matrix: [COMPATIBILITY.md](COMPATIBILITY.md).
+
 ## Key Features
 
 - **TTL-based locks** — Locks auto-expire after a configurable duration
