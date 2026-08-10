@@ -17,6 +17,7 @@ import (
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	distributedlockv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/distributedlock/v1"
+	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
 	_ "modernc.org/sqlite"
 )
 
@@ -79,7 +80,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Distributed Lock SQLite",
-		Version:      "0.1.0",
+		Version:      "0.1.1",
 		Roles:        []string{"infrastructure"},
 		Description:  "SQLite-backed lock provider (single-node; see COMPATIBILITY for shared-volume limits)",
 		Author:       "MuxCore",
@@ -162,6 +163,7 @@ func (m *Module) Init(ctx context.Context) error {
 func (m *Module) Start(ctx context.Context) error {
 	m.grpcSrv = grpc.NewServer()
 	distributedlockv1.RegisterDistributedLockServiceServer(m.grpcSrv, m)
+	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
 
 	m.done = make(chan struct{})
 	m.sweeper = time.NewTicker(m.sweepInterval)
