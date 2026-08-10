@@ -1,6 +1,6 @@
 {
   "name": "Distributed Lock SQLite",
-  "description": "SQLite-backed distributed lock provider for cluster-wide coordination",
+  "description": "SQLite-backed lock provider (single-node; see COMPATIBILITY for shared-volume limits)",
   "version": "0.1.0",
   "author": "MuxCore",
   "roles": ["infrastructure"],
