@@ -423,3 +423,39 @@ func TestLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSettingsDBPathAndSweep(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.db")
+	pathB := filepath.Join(dir, "b.db")
+	m := NewModule(Config{DBPath: pathA, GRPCAddr: "127.0.0.1:0", SweepInterval: time.Second})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = m.Stop(ctx) }()
+	defs := m.Settings()
+	if len(defs) != 2 || defs[0].Key != "db_path" {
+		t.Fatalf("Settings=%+v", defs)
+	}
+	if err := m.UpdateSetting("sweep_interval", "250ms"); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.RLock()
+	got := m.sweepInterval
+	m.mu.RUnlock()
+	if got != 250*time.Millisecond {
+		t.Fatalf("sweepInterval=%v", got)
+	}
+	acq, err := m.Acquire(ctx, &distributedlockv1.AcquireRequest{Key: "k", HolderId: "h", TtlMs: 5000})
+	if err != nil || !acq.GetAcquired() {
+		t.Fatalf("acquire before reopen: %v %+v", err, acq)
+	}
+	if err := m.UpdateSetting("db_path", pathB); err != nil {
+		t.Fatal(err)
+	}
+	acq2, err := m.Acquire(ctx, &distributedlockv1.AcquireRequest{Key: "k", HolderId: "h2", TtlMs: 5000})
+	if err != nil || !acq2.GetAcquired() {
+		t.Fatalf("acquire after reopen should succeed on empty DB: %v %+v", err, acq2)
+	}
+}
