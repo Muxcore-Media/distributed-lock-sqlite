@@ -1,8 +1,10 @@
 # Distributed Lock SQLite
 
-SQLite-backed distributed lock provider for cluster-wide coordination in MuxCore.
+SQLite-backed lock provider for mesh-wide coordination on a **single MuxCore host** (or carefully constrained shared volume).
 
-A gRPC sidecar module that provides distributed mutexes using a local SQLite database with WAL mode. TTL-based lock expiration, automatic expired lock sweeping, and re-acquire by the same holder. Without this module, core has no durable distributed lock capability.
+A gRPC sidecar that implements `DistributedLockProvider` using a local SQLite database with WAL mode. TTL-based lock expiration, automatic expired lock sweeping, and re-acquire by the same holder. Without this module, core has no durable lock capability.
+
+> **Not multi-writer HA.** See [COMPATIBILITY.md](COMPATIBILITY.md) for single-node vs shared-volume vs multi-module limits.
 
 ## Key Features
 
