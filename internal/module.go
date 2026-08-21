@@ -52,7 +52,7 @@ func NewModule(cfg Config) *Module {
 		cfg.DBPath = "/var/lib/distributed-lock-sqlite/locks.db"
 	}
 	if cfg.GRPCAddr == "" {
-		cfg.GRPCAddr = ":9612"
+		cfg.GRPCAddr = ":9604"
 	}
 	if cfg.SweepInterval == 0 {
 		cfg.SweepInterval = 10 * time.Second
