@@ -31,7 +31,7 @@ For cluster-wide locks, use an external store (Redis `SET NX`, etcd, Postgres ad
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `LOCK_GRPC_ADDR` | `:9612` | gRPC listen address |
+| `LOCK_GRPC_ADDR` | `:9604` | gRPC listen address |
 | `LOCK_DB_PATH` | `/var/lib/distributed-lock-sqlite/locks.db` | SQLite database path |
 | `LOCK_SWEEP_INTERVAL` | `10s` | Expired lock sweep interval |
 | `MUXCORE_INSECURE_DISABLE_TLS` | unset | Set `true` to disable TLS for the module SDK |
