@@ -81,7 +81,7 @@ func (m *Module) reopenDB(ctx context.Context, path string) error {
 		return fmt.Errorf("open sqlite: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("enable WAL: %w", err)
 	}
 	db.SetMaxOpenConns(1)
@@ -94,13 +94,13 @@ func (m *Module) reopenDB(ctx context.Context, path string) error {
 			created_at INTEGER NOT NULL
 		)
 	`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("create locks table: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_locks_expires ON locks(expires_at)
 	`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("create index: %w", err)
 	}
 
