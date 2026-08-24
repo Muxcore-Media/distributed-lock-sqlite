@@ -117,7 +117,7 @@ func (m *Module) Init(ctx context.Context) error {
 	}
 
 	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("enable WAL: %w", err)
 	}
 	db.SetMaxOpenConns(1)
@@ -131,13 +131,13 @@ func (m *Module) Init(ctx context.Context) error {
 			created_at INTEGER NOT NULL
 		)
 	`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("create locks table: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_locks_expires ON locks(expires_at)
 	`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("create index: %w", err)
 	}
 
@@ -147,7 +147,7 @@ func (m *Module) Init(ctx context.Context) error {
 
 	lis, err := net.Listen("tcp", m.grpcAddr)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("listen %s: %w", m.grpcAddr, err)
 	}
 	m.lis = lis
@@ -190,7 +190,7 @@ func (m *Module) Stop(ctx context.Context) error {
 	}
 	m.mu.Lock()
 	if m.db != nil {
-		m.db.Close()
+		_ = m.db.Close()
 		m.db = nil
 	}
 	m.mu.Unlock()
@@ -227,7 +227,7 @@ func (m *Module) Acquire(ctx context.Context, req *distributedlockv1.AcquireRequ
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM locks WHERE expires_at <= ?`, now); err != nil {
 		return nil, fmt.Errorf("prune expired: %w", err)
