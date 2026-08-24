@@ -49,7 +49,7 @@ func newTestModule(t *testing.T) *Module {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() {
-		m.Stop(ctx)
+		_ = m.Stop(ctx)
 	})
 	return m
 }
@@ -291,7 +291,6 @@ func TestConcurrent(t *testing.T) {
 	m := newTestModule(t)
 	ctx := context.Background()
 
-	const numKeys = 10
 	const numGoroutines = 50
 
 	var wg sync.WaitGroup
