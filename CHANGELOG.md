@@ -8,7 +8,7 @@
 
 ### Changed
 
-- `muxcore.json` / `Info()` align `minCoreVersion` and contract pin to **0.5.0** (matches `go.mod` core **v0.5.2**)
+- `muxcore.json` / `Info()` align `minCoreVersion` and contract pin to **0.5.0** (matches `go.mod` core **v0.5.8**)
 
 ## [0.1.2] — 2026-08-10
 
@@ -22,6 +22,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ## [Unreleased]
+
+### Added
+
+- `pkg/client` implementing `DistributedLockProvider` with bufconn tests
+- Restart persistence test; gRPC Serve round-trip test
+- Settings persistence (`db_path`, `sweep_interval`) beside the database
+- Input validation (`InvalidArgument`) for empty keys/tokens and non-positive TTL
+- SQLite `busy_timeout(5000)` pragma; loopback default `LOCK_GRPC_ADDR=127.0.0.1:9604`
+
+### Fixed
+
+- Stop lock theft via holder_id re-acquire; conflict errors no longer leak holder IDs
+- Hold DB read lock for entire Acquire/Unlock/Renew/sweep operations during reopen
+- `filepath.Dir` for database directory creation; invalid `LOCK_SWEEP_INTERVAL` fails startup
+- Wire `var version` in `cmd/module/main.go` for Makefile `-X main.version`
 
 ## [0.1.1] — 2026-08-10
 

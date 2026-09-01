@@ -5,15 +5,20 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	distributedlockv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/distributedlock/v1"
@@ -44,7 +49,12 @@ type Config struct {
 	SweepInterval time.Duration
 }
 
-func NewModule(cfg Config) *Module {
+type persistedSettings struct {
+	DBPath        string `json:"db_path"`
+	SweepInterval string `json:"sweep_interval"`
+}
+
+func NewModule(cfg Config) (*Module, error) {
 	if cfg.ID == "" {
 		cfg.ID = "distributed-lock-sqlite"
 	}
@@ -52,7 +62,7 @@ func NewModule(cfg Config) *Module {
 		cfg.DBPath = "/var/lib/distributed-lock-sqlite/locks.db"
 	}
 	if cfg.GRPCAddr == "" {
-		cfg.GRPCAddr = ":9604"
+		cfg.GRPCAddr = "127.0.0.1:9604"
 	}
 	if cfg.SweepInterval == 0 {
 		cfg.SweepInterval = 10 * time.Second
@@ -64,23 +74,25 @@ func NewModule(cfg Config) *Module {
 		cfg.GRPCAddr = v
 	}
 	if v := os.Getenv("LOCK_SWEEP_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			cfg.SweepInterval = d
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("invalid LOCK_SWEEP_INTERVAL %q", v)
 		}
+		cfg.SweepInterval = d
 	}
 	return &Module{
 		id:            cfg.ID,
 		dbPath:        cfg.DBPath,
 		grpcAddr:      cfg.GRPCAddr,
 		sweepInterval: cfg.SweepInterval,
-	}
+	}, nil
 }
 
 func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Distributed Lock SQLite",
-		Version:      "0.1.3",
+		Version:      Version,
 		Roles:        []string{"infrastructure"},
 		Description:  "SQLite-backed lock provider (single-node; see COMPATIBILITY for shared-volume limits)",
 		Author:       "MuxCore",
@@ -98,59 +110,25 @@ func (m *Module) Info() contracts.ModuleInfo {
 }
 
 func (m *Module) Init(ctx context.Context) error {
-	dir := m.dbPath
-	for i := len(dir) - 1; i >= 0; i-- {
-		if dir[i] == '/' {
-			dir = dir[:i]
-			break
-		}
+	if err := m.loadPersistedSettings(); err != nil {
+		return err
 	}
-	if dir != m.dbPath {
+
+	dir := filepath.Dir(m.dbPath)
+	if dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return fmt.Errorf("create db directory %s: %w", dir, err)
 		}
 	}
 
-	db, err := sql.Open("sqlite", m.dbPath)
+	db, err := openSQLite(ctx, m.dbPath)
 	if err != nil {
-		return fmt.Errorf("open sqlite: %w", err)
-	}
-
-	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("enable WAL: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-
-	if _, err := db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS locks (
-			key        TEXT PRIMARY KEY,
-			holder_id  TEXT NOT NULL,
-			token      TEXT NOT NULL,
-			expires_at INTEGER NOT NULL,
-			created_at INTEGER NOT NULL
-		)
-	`); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("create locks table: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS idx_locks_expires ON locks(expires_at)
-	`); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("create index: %w", err)
+		return err
 	}
 
 	m.mu.Lock()
 	m.db = db
 	m.mu.Unlock()
-
-	lis, err := net.Listen("tcp", m.grpcAddr)
-	if err != nil {
-		_ = db.Close()
-		return fmt.Errorf("listen %s: %w", m.grpcAddr, err)
-	}
-	m.lis = lis
 
 	slog.Info("distributed-lock-sqlite initialized",
 		"db", m.dbPath,
@@ -161,6 +139,14 @@ func (m *Module) Init(ctx context.Context) error {
 }
 
 func (m *Module) Start(ctx context.Context) error {
+	if m.lis == nil {
+		lis, err := net.Listen("tcp", m.grpcAddr)
+		if err != nil {
+			return fmt.Errorf("listen %s: %w", m.grpcAddr, err)
+		}
+		m.lis = lis
+	}
+
 	m.grpcSrv = grpc.NewServer()
 	distributedlockv1.RegisterDistributedLockServiceServer(m.grpcSrv, m)
 	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
@@ -200,19 +186,26 @@ func (m *Module) Stop(ctx context.Context) error {
 
 func (m *Module) Health(ctx context.Context) error {
 	m.mu.RLock()
-	db := m.db
-	m.mu.RUnlock()
-	if db == nil {
+	defer m.mu.RUnlock()
+	if m.db == nil {
 		return errors.New("database not initialized")
 	}
-	return db.PingContext(ctx)
+	return m.db.PingContext(ctx)
+}
+
+// SetListener attaches a net.Listener before Start (tests).
+func (m *Module) SetListener(lis net.Listener) {
+	m.lis = lis
 }
 
 func (m *Module) Acquire(ctx context.Context, req *distributedlockv1.AcquireRequest) (*distributedlockv1.AcquireResponse, error) {
+	if err := validateAcquire(req); err != nil {
+		return nil, err
+	}
+
 	m.mu.RLock()
-	db := m.db
-	m.mu.RUnlock()
-	if db == nil {
+	defer m.mu.RUnlock()
+	if m.db == nil {
 		return nil, errors.New("not initialized")
 	}
 
@@ -223,7 +216,7 @@ func (m *Module) Acquire(ctx context.Context, req *distributedlockv1.AcquireRequ
 		return nil, fmt.Errorf("new token: %w", err)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
@@ -252,30 +245,12 @@ func (m *Module) Acquire(ctx context.Context, req *distributedlockv1.AcquireRequ
 		}, nil
 	}
 
-	var existingHolder string
 	var existingExpires int64
 	err = tx.QueryRowContext(ctx,
-		`SELECT holder_id, expires_at FROM locks WHERE key = ?`, req.GetKey(),
-	).Scan(&existingHolder, &existingExpires)
+		`SELECT expires_at FROM locks WHERE key = ?`, req.GetKey(),
+	).Scan(&existingExpires)
 	if err != nil {
 		return nil, fmt.Errorf("check existing lock: %w", err)
-	}
-
-	if existingHolder == req.GetHolderId() {
-		_, err = tx.ExecContext(ctx,
-			`UPDATE locks SET token = ?, expires_at = ?, created_at = ? WHERE key = ?`,
-			token, expiresAt, now, req.GetKey(),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("re-acquire: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit re-acquire: %w", err)
-		}
-		return &distributedlockv1.AcquireResponse{
-			Acquired:  true,
-			LockToken: token,
-		}, nil
 	}
 
 	remaining := (existingExpires - now) / 1_000_000
@@ -283,21 +258,23 @@ func (m *Module) Acquire(ctx context.Context, req *distributedlockv1.AcquireRequ
 		remaining = 0
 	}
 	return &distributedlockv1.AcquireResponse{
-		Acquired:  false,
-		LockToken: "",
-		Error:     fmt.Sprintf("held by %s for ~%dms", existingHolder, remaining),
+		Acquired: false,
+		Error:    fmt.Sprintf("lock held for ~%dms", remaining),
 	}, nil
 }
 
 func (m *Module) Unlock(ctx context.Context, req *distributedlockv1.UnlockRequest) (*distributedlockv1.UnlockResponse, error) {
+	if err := validateUnlock(req); err != nil {
+		return nil, err
+	}
+
 	m.mu.RLock()
-	db := m.db
-	m.mu.RUnlock()
-	if db == nil {
+	defer m.mu.RUnlock()
+	if m.db == nil {
 		return nil, errors.New("not initialized")
 	}
 
-	res, err := db.ExecContext(ctx,
+	res, err := m.db.ExecContext(ctx,
 		`DELETE FROM locks WHERE key = ? AND token = ?`,
 		req.GetKey(), req.GetLockToken(),
 	)
@@ -310,17 +287,20 @@ func (m *Module) Unlock(ctx context.Context, req *distributedlockv1.UnlockReques
 }
 
 func (m *Module) Renew(ctx context.Context, req *distributedlockv1.RenewRequest) (*distributedlockv1.RenewResponse, error) {
+	if err := validateRenew(req); err != nil {
+		return nil, err
+	}
+
 	m.mu.RLock()
-	db := m.db
-	m.mu.RUnlock()
-	if db == nil {
+	defer m.mu.RUnlock()
+	if m.db == nil {
 		return nil, errors.New("not initialized")
 	}
 
 	now := time.Now().UnixNano()
 	newExpires := now + (req.GetTtlMs() * 1_000_000)
 
-	res, err := db.ExecContext(ctx,
+	res, err := m.db.ExecContext(ctx,
 		`UPDATE locks SET expires_at = ? WHERE key = ? AND token = ? AND expires_at > ?`,
 		newExpires, req.GetKey(), req.GetLockToken(), now,
 	)
@@ -339,15 +319,15 @@ func (m *Module) sweepLoop() {
 			return
 		case <-m.sweeper.C:
 			m.mu.RLock()
-			db := m.db
-			m.mu.RUnlock()
-			if db == nil {
+			if m.db == nil {
+				m.mu.RUnlock()
 				continue
 			}
 			now := time.Now().UnixNano()
-			res, err := db.ExecContext(context.Background(),
+			res, err := m.db.ExecContext(context.Background(),
 				`DELETE FROM locks WHERE expires_at <= ?`, now,
 			)
+			m.mu.RUnlock()
 			if err != nil {
 				slog.Error("sweep expired locks", "error", err)
 				continue
@@ -357,6 +337,131 @@ func (m *Module) sweepLoop() {
 			}
 		}
 	}
+}
+
+func openSQLite(ctx context.Context, path string) (*sql.DB, error) {
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS locks (
+			key        TEXT PRIMARY KEY,
+			holder_id  TEXT NOT NULL,
+			token      TEXT NOT NULL,
+			expires_at INTEGER NOT NULL,
+			created_at INTEGER NOT NULL
+		)
+	`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("create locks table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_locks_expires ON locks(expires_at)
+	`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("create index: %w", err)
+	}
+
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+func validateAcquire(req *distributedlockv1.AcquireRequest) error {
+	if strings.TrimSpace(req.GetKey()) == "" {
+		return status.Error(codes.InvalidArgument, "key is required")
+	}
+	if strings.TrimSpace(req.GetHolderId()) == "" {
+		return status.Error(codes.InvalidArgument, "holder_id is required")
+	}
+	if req.GetTtlMs() <= 0 {
+		return status.Error(codes.InvalidArgument, "ttl_ms must be positive")
+	}
+	return nil
+}
+
+func validateUnlock(req *distributedlockv1.UnlockRequest) error {
+	if strings.TrimSpace(req.GetKey()) == "" {
+		return status.Error(codes.InvalidArgument, "key is required")
+	}
+	if strings.TrimSpace(req.GetLockToken()) == "" {
+		return status.Error(codes.InvalidArgument, "lock_token is required")
+	}
+	return nil
+}
+
+func validateRenew(req *distributedlockv1.RenewRequest) error {
+	if strings.TrimSpace(req.GetKey()) == "" {
+		return status.Error(codes.InvalidArgument, "key is required")
+	}
+	if strings.TrimSpace(req.GetLockToken()) == "" {
+		return status.Error(codes.InvalidArgument, "lock_token is required")
+	}
+	if req.GetTtlMs() <= 0 {
+		return status.Error(codes.InvalidArgument, "ttl_ms must be positive")
+	}
+	return nil
+}
+
+func (m *Module) settingsFilePath() string {
+	dir := filepath.Dir(m.dbPath)
+	if dir == "." || dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, "distributed-lock-sqlite-settings.json")
+}
+
+func (m *Module) loadPersistedSettings() error {
+	data, err := os.ReadFile(m.settingsFilePath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read settings: %w", err)
+	}
+	var ps persistedSettings
+	if err := json.Unmarshal(data, &ps); err != nil {
+		return fmt.Errorf("parse settings: %w", err)
+	}
+	if ps.DBPath != "" {
+		m.dbPath = ps.DBPath
+	}
+	if ps.SweepInterval != "" {
+		d, err := time.ParseDuration(ps.SweepInterval)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("invalid persisted sweep_interval %q", ps.SweepInterval)
+		}
+		m.sweepInterval = d
+	}
+	return nil
+}
+
+func (m *Module) savePersistedSettings() error {
+	m.mu.RLock()
+	ps := persistedSettings{
+		DBPath:        m.dbPath,
+		SweepInterval: m.sweepInterval.String(),
+	}
+	m.mu.RUnlock()
+
+	data, err := json.Marshal(ps)
+	if err != nil {
+		return fmt.Errorf("marshal settings: %w", err)
+	}
+	path := m.settingsFilePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create settings directory: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write settings: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename settings: %w", err)
+	}
+	return nil
 }
 
 func newToken() (string, error) {
