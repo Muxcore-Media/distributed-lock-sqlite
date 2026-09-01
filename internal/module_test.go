@@ -3,22 +3,37 @@ package internal
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Muxcore-Media/core/pkg/contracts"
 	distributedlockv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/distributedlock/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
 )
 
+const bufSize = 1 << 20
+
 func TestModuleInfo(t *testing.T) {
-	m := NewModule(Config{})
+	Version = "0.1.3"
+	m, err := NewModule(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	info := m.Info()
 	if info.ID == "" {
 		t.Error("module ID must not be empty")
 	}
-	if info.Version == "" {
-		t.Error("module version must not be empty")
+	if info.Version != "0.1.3" {
+		t.Errorf("version = %q want 0.1.3", info.Version)
 	}
 	if info.MinCoreVersion == "" {
 		t.Error("MinCoreVersion must not be empty")
@@ -37,13 +52,34 @@ func TestModuleInfo(t *testing.T) {
 	}
 }
 
+func TestDefaultGRPCAddr(t *testing.T) {
+	m, err := NewModule(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.grpcAddr != "127.0.0.1:9604" {
+		t.Fatalf("grpcAddr=%q want 127.0.0.1:9604", m.grpcAddr)
+	}
+}
+
+func TestInvalidSweepIntervalEnv(t *testing.T) {
+	t.Setenv("LOCK_SWEEP_INTERVAL", "not-a-duration")
+	_, err := NewModule(Config{})
+	if err == nil {
+		t.Fatal("expected error for invalid LOCK_SWEEP_INTERVAL")
+	}
+}
+
 func newTestModule(t *testing.T) *Module {
 	t.Helper()
-	m := NewModule(Config{
+	m, err := NewModule(Config{
 		DBPath:        filepath.Join(t.TempDir(), "test.db"),
-		GRPCAddr:      ":0",
+		GRPCAddr:      "127.0.0.1:0",
 		SweepInterval: 100 * time.Millisecond,
 	})
+	if err != nil {
+		t.Fatalf("NewModule: %v", err)
+	}
 	ctx := context.Background()
 	if err := m.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -114,6 +150,53 @@ func TestAcquireConflict(t *testing.T) {
 	}
 	if resp.Error == "" {
 		t.Fatal("expected error description")
+	}
+	if strings.Contains(resp.Error, "holder-1") {
+		t.Fatalf("conflict error must not leak holder_id: %q", resp.Error)
+	}
+}
+
+func TestHolderIDCannotStealLock(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+
+	resp, err := m.Acquire(ctx, &distributedlockv1.AcquireRequest{
+		Key:      "steal-key",
+		TtlMs:    60_000,
+		HolderId: "holder-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Acquired {
+		t.Fatal("expected first acquire to succeed")
+	}
+
+	resp2, err := m.Acquire(ctx, &distributedlockv1.AcquireRequest{
+		Key:      "steal-key",
+		TtlMs:    60_000,
+		HolderId: "holder-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp2.Acquired {
+		t.Fatal("same holder_id must not re-acquire without token")
+	}
+
+	resp3, err := m.Acquire(ctx, &distributedlockv1.AcquireRequest{
+		Key:      "steal-key",
+		TtlMs:    60_000,
+		HolderId: "holder-2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp3.Acquired {
+		t.Fatal("expected conflict for different holder")
+	}
+	if strings.Contains(resp3.Error, "holder-1") {
+		t.Fatalf("conflict error must not leak holder_id: %q", resp3.Error)
 	}
 }
 
@@ -236,7 +319,7 @@ func TestTokenProtection(t *testing.T) {
 	}
 }
 
-func TestReentrant(t *testing.T) {
+func TestSameHolderUsesRenewNotReacquire(t *testing.T) {
 	m := newTestModule(t)
 	ctx := context.Background()
 
@@ -260,30 +343,31 @@ func TestReentrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resp2.Acquired {
-		t.Fatal("expected reentrant acquire to succeed")
+	if resp2.Acquired {
+		t.Fatal("expected re-acquire without token to fail")
 	}
 
-	unlock, err := m.Unlock(ctx, &distributedlockv1.UnlockRequest{
+	renew, err := m.Renew(ctx, &distributedlockv1.RenewRequest{
 		Key:       "reentrant-key",
-		LockToken: resp2.LockToken,
+		LockToken: resp.LockToken,
+		TtlMs:     120_000,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !unlock.Released {
-		t.Fatal("expected unlock after reentrant to succeed")
+	if !renew.Renewed {
+		t.Fatal("expected renew to succeed for same holder")
 	}
 
-	unlock, err = m.Unlock(ctx, &distributedlockv1.UnlockRequest{
+	unlock, err := m.Unlock(ctx, &distributedlockv1.UnlockRequest{
 		Key:       "reentrant-key",
 		LockToken: resp.LockToken,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unlock.Released {
-		t.Fatal("expected old token unlock to fail after re-acquire")
+	if !unlock.Released {
+		t.Fatal("expected unlock after renew to succeed")
 	}
 }
 
@@ -403,10 +487,13 @@ func TestHealth(t *testing.T) {
 }
 
 func TestLifecycle(t *testing.T) {
-	m := NewModule(Config{
+	m, err := NewModule(Config{
 		DBPath:   filepath.Join(t.TempDir(), "lifecycle.db"),
-		GRPCAddr: ":0",
+		GRPCAddr: "127.0.0.1:0",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 
 	if err := m.Init(ctx); err != nil {
@@ -423,11 +510,152 @@ func TestLifecycle(t *testing.T) {
 	}
 }
 
+func TestGRPCServe(t *testing.T) {
+	m, err := NewModule(Config{
+		DBPath:   filepath.Join(t.TempDir(), "grpc.db"),
+		GRPCAddr: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lis := bufconn.Listen(bufSize)
+	m.SetListener(lis)
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Stop(ctx) })
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := distributedlockv1.NewDistributedLockServiceClient(conn)
+	acq, err := client.Acquire(ctx, &distributedlockv1.AcquireRequest{
+		Key: "grpc-key", HolderId: "h1", TtlMs: 60_000,
+	})
+	if err != nil || !acq.GetAcquired() {
+		t.Fatalf("Acquire: %v %+v", err, acq)
+	}
+	renew, err := client.Renew(ctx, &distributedlockv1.RenewRequest{
+		Key: "grpc-key", LockToken: acq.GetLockToken(), TtlMs: 120_000,
+	})
+	if err != nil || !renew.GetRenewed() {
+		t.Fatalf("Renew: %v %+v", err, renew)
+	}
+	unlock, err := client.Unlock(ctx, &distributedlockv1.UnlockRequest{
+		Key: "grpc-key", LockToken: acq.GetLockToken(),
+	})
+	if err != nil || !unlock.GetReleased() {
+		t.Fatalf("Unlock: %v %+v", err, unlock)
+	}
+}
+
+func TestRestartPersistence(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "persist.db")
+	ctx := context.Background()
+
+	m1, err := NewModule(Config{DBPath: dbPath, GRPCAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m1.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	acq, err := m1.Acquire(ctx, &distributedlockv1.AcquireRequest{
+		Key: "persist-key", HolderId: "holder-1", TtlMs: 60_000,
+	})
+	if err != nil || !acq.GetAcquired() {
+		t.Fatalf("first acquire: %v %+v", err, acq)
+	}
+	if err := m1.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	m2, err := NewModule(Config{DBPath: dbPath, GRPCAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = m2.Stop(ctx) }()
+
+	acq2, err := m2.Acquire(ctx, &distributedlockv1.AcquireRequest{
+		Key: "persist-key", HolderId: "holder-2", TtlMs: 60_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acq2.GetAcquired() {
+		t.Fatal("expected lock still held after process restart until TTL expires")
+	}
+}
+
+func TestValidationErrors(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		run  func() error
+	}{
+		{"acquire empty key", func() error {
+			_, err := m.Acquire(ctx, &distributedlockv1.AcquireRequest{HolderId: "h", TtlMs: 1000})
+			return err
+		}},
+		{"acquire empty holder", func() error {
+			_, err := m.Acquire(ctx, &distributedlockv1.AcquireRequest{Key: "k", TtlMs: 1000})
+			return err
+		}},
+		{"acquire zero ttl", func() error {
+			_, err := m.Acquire(ctx, &distributedlockv1.AcquireRequest{Key: "k", HolderId: "h", TtlMs: 0})
+			return err
+		}},
+		{"unlock empty token", func() error {
+			_, err := m.Unlock(ctx, &distributedlockv1.UnlockRequest{Key: "k"})
+			return err
+		}},
+		{"renew empty token", func() error {
+			_, err := m.Renew(ctx, &distributedlockv1.RenewRequest{Key: "k", TtlMs: 1000})
+			return err
+		}},
+		{"renew zero ttl", func() error {
+			_, err := m.Renew(ctx, &distributedlockv1.RenewRequest{Key: "k", LockToken: "t", TtlMs: 0})
+			return err
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("code=%v want InvalidArgument", status.Code(err))
+			}
+		})
+	}
+}
+
 func TestSettingsDBPathAndSweep(t *testing.T) {
 	dir := t.TempDir()
 	pathA := filepath.Join(dir, "a.db")
 	pathB := filepath.Join(dir, "b.db")
-	m := NewModule(Config{DBPath: pathA, GRPCAddr: "127.0.0.1:0", SweepInterval: time.Second})
+	m, err := NewModule(Config{DBPath: pathA, GRPCAddr: "127.0.0.1:0", SweepInterval: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	if err := m.Init(ctx); err != nil {
 		t.Fatal(err)
@@ -456,5 +684,39 @@ func TestSettingsDBPathAndSweep(t *testing.T) {
 	acq2, err := m.Acquire(ctx, &distributedlockv1.AcquireRequest{Key: "k", HolderId: "h2", TtlMs: 5000})
 	if err != nil || !acq2.GetAcquired() {
 		t.Fatalf("acquire after reopen should succeed on empty DB: %v %+v", err, acq2)
+	}
+
+	settingsPath := filepath.Join(dir, "distributed-lock-sqlite-settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), pathB) || !strings.Contains(string(data), "250ms") {
+		t.Fatalf("settings not persisted: %s", data)
+	}
+
+	m3, err := NewModule(Config{DBPath: pathA, GRPCAddr: "127.0.0.1:0", SweepInterval: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m3.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = m3.Stop(ctx) }()
+	m3.mu.RLock()
+	loadedPath := m3.dbPath
+	loadedSweep := m3.sweepInterval
+	m3.mu.RUnlock()
+	if loadedPath != pathB {
+		t.Fatalf("db_path after restart=%q want %q", loadedPath, pathB)
+	}
+	if loadedSweep != 250*time.Millisecond {
+		t.Fatalf("sweep_interval after restart=%v want 250ms", loadedSweep)
+	}
+}
+
+func TestErrLockHeldContract(t *testing.T) {
+	if contracts.ErrLockHeld == nil {
+		t.Fatal("ErrLockHeld must be defined")
 	}
 }

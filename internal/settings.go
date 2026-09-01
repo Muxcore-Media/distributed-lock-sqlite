@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,7 +53,10 @@ func (m *Module) updateSetting(key, value string) error {
 		if value == "" {
 			return fmt.Errorf("db_path must not be empty")
 		}
-		return m.reopenDB(context.Background(), value)
+		if err := m.reopenDB(context.Background(), value); err != nil {
+			return err
+		}
+		return m.savePersistedSettings()
 	case "sweep_interval", "LOCK_SWEEP_INTERVAL":
 		d, err := time.ParseDuration(value)
 		if err != nil || d <= 0 {
@@ -66,7 +68,7 @@ func (m *Module) updateSetting(key, value string) error {
 			m.sweeper.Reset(d)
 		}
 		m.mu.Unlock()
-		return nil
+		return m.savePersistedSettings()
 	default:
 		return fmt.Errorf("unknown setting %q", key)
 	}
@@ -76,32 +78,9 @@ func (m *Module) reopenDB(ctx context.Context, path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("create db directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := openSQLite(ctx, path)
 	if err != nil {
-		return fmt.Errorf("open sqlite: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("enable WAL: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS locks (
-			key        TEXT PRIMARY KEY,
-			holder_id  TEXT NOT NULL,
-			token      TEXT NOT NULL,
-			expires_at INTEGER NOT NULL,
-			created_at INTEGER NOT NULL
-		)
-	`); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("create locks table: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS idx_locks_expires ON locks(expires_at)
-	`); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("create index: %w", err)
+		return err
 	}
 
 	m.mu.Lock()
@@ -109,6 +88,7 @@ func (m *Module) reopenDB(ctx context.Context, path string) error {
 	m.db = db
 	m.dbPath = path
 	m.mu.Unlock()
+
 	if old != nil {
 		_ = old.Close()
 	}
