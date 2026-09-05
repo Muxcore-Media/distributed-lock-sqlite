@@ -53,12 +53,26 @@ func TestModuleInfo(t *testing.T) {
 }
 
 func TestDefaultGRPCAddr(t *testing.T) {
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
 	m, err := NewModule(Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m.grpcAddr != "127.0.0.1:9604" {
 		t.Fatalf("grpcAddr=%q want 127.0.0.1:9604", m.grpcAddr)
+	}
+}
+
+func TestResolveGRPCAddr_InsecureLoopback(t *testing.T) {
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
+	if got := resolveGRPCAddr(":9604"); got != "127.0.0.1:9604" {
+		t.Fatalf("got %q", got)
+	}
+	if got := resolveGRPCAddr("0.0.0.0:9604"); got != "127.0.0.1:9604" {
+		t.Fatalf("got %q", got)
+	}
+	if got := resolveGRPCAddr("192.168.1.1:9604"); got != "192.168.1.1:9604" {
+		t.Fatalf("got %q", got)
 	}
 }
 
@@ -487,6 +501,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestLifecycle(t *testing.T) {
+	t.Setenv("LOCK_TLS_DIR", t.TempDir())
 	m, err := NewModule(Config{
 		DBPath:   filepath.Join(t.TempDir(), "lifecycle.db"),
 		GRPCAddr: "127.0.0.1:0",
@@ -511,6 +526,7 @@ func TestLifecycle(t *testing.T) {
 }
 
 func TestGRPCServe(t *testing.T) {
+	t.Setenv("MUXCORE_INSECURE_DISABLE_TLS", "true")
 	m, err := NewModule(Config{
 		DBPath:   filepath.Join(t.TempDir(), "grpc.db"),
 		GRPCAddr: "127.0.0.1:0",
