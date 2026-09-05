@@ -34,11 +34,12 @@ For cluster-wide locks, use an external store (Redis `SET NX`, etcd, Postgres ad
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `LOCK_GRPC_ADDR` | `127.0.0.1:9604` | gRPC listen address (loopback by default) |
+| `LOCK_GRPC_ADDR` | `127.0.0.1:9604` | gRPC listen address (loopback by default; set explicitly for non-loopback) |
 | `LOCK_DB_PATH` | `/var/lib/distributed-lock-sqlite/locks.db` | SQLite database path |
 | `LOCK_SWEEP_INTERVAL` | `10s` | Expired lock sweep interval (Go duration; invalid values fail startup) |
-| `MUXCORE_INSECURE_DISABLE_TLS` | unset | Set `true` to disable TLS for the module SDK |
+| `MUXCORE_INSECURE_DISABLE_TLS` | unset | Dev-only: disable TLS on inbound and outbound gRPC |
 | `MUXCORE_GRPC_INSECURE` | unset | Alias for `MUXCORE_INSECURE_DISABLE_TLS` |
+| `LOCK_TLS_CERT` / `_KEY` / `_CA` / `_DIR` | — | Optional TLS material (auto-generated when unset) |
 
 ### MVP stack
 
@@ -47,13 +48,15 @@ Enable in `_mvp/run-host.sh` with `MVP_ENABLE_DISTRIBUTED_LOCK=1`. Data lands un
 ## Usage
 
 ```bash
-export MUXCORE_INSECURE_DISABLE_TLS=true
 distributed-lock-sqlite
 ```
+
+Production uses TLS by default on the module gRPC listener. For local dev without TLS, set `MUXCORE_INSECURE_DISABLE_TLS=true` on both core and this module.
 
 ### Go client
 
 ```go
+// Dev only — use TLS credentials in production (see LOCK_TLS_* / auto-generated CA).
 conn, _ := grpc.NewClient("127.0.0.1:9604", grpc.WithTransportCredentials(insecure.NewCredentials()))
 lock := client.New(conn, "my-module")
 handle, err := lock.Acquire(ctx, "migration", 30*time.Second)
