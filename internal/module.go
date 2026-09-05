@@ -18,11 +18,13 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	distributedlockv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/distributedlock/v1"
 	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
+	"github.com/Muxcore-Media/distributed-lock-sqlite/internal/grpctls"
 	_ "modernc.org/sqlite"
 )
 
@@ -73,6 +75,7 @@ func NewModule(cfg Config) (*Module, error) {
 	if v := os.Getenv("LOCK_GRPC_ADDR"); v != "" {
 		cfg.GRPCAddr = v
 	}
+	cfg.GRPCAddr = resolveGRPCAddr(cfg.GRPCAddr)
 	if v := os.Getenv("LOCK_SWEEP_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d <= 0 {
@@ -147,7 +150,21 @@ func (m *Module) Start(ctx context.Context) error {
 		m.lis = lis
 	}
 
-	m.grpcSrv = grpc.NewServer()
+	var grpcOpts []grpc.ServerOption
+	tlsCfg, err := grpctls.ServerConfig()
+	if err != nil {
+		return fmt.Errorf("gRPC TLS: %w", err)
+	}
+	if tlsCfg != nil {
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+		slog.Info("distributed-lock-sqlite gRPC TLS enabled", "addr", m.grpcAddr)
+	} else {
+		slog.Warn("distributed-lock-sqlite gRPC listening without TLS (dev only)",
+			"addr", m.grpcAddr,
+			"hint", "unset MUXCORE_INSECURE_DISABLE_TLS for production",
+		)
+	}
+	m.grpcSrv = grpc.NewServer(grpcOpts...)
 	distributedlockv1.RegisterDistributedLockServiceServer(m.grpcSrv, m)
 	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
 
@@ -462,6 +479,25 @@ func (m *Module) savePersistedSettings() error {
 		return fmt.Errorf("rename settings: %w", err)
 	}
 	return nil
+}
+
+// resolveGRPCAddr prefers loopback when plaintext is explicitly enabled and the
+// bind address would otherwise listen on all interfaces.
+func resolveGRPCAddr(addr string) string {
+	if !grpctls.InsecureAllowed() {
+		return addr
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		if strings.HasPrefix(addr, ":") {
+			return "127.0.0.1" + addr
+		}
+		return addr
+	}
+	if host == "" || host == "0.0.0.0" {
+		return "127.0.0.1:" + port
+	}
+	return addr
 }
 
 func newToken() (string, error) {
