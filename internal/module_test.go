@@ -13,6 +13,8 @@ import (
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	distributedlockv1 "github.com/Muxcore-Media/core/proto/gen/muxcore/distributedlock/v1"
+	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
+	manifest "github.com/Muxcore-Media/distributed-lock-sqlite"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -23,7 +25,7 @@ import (
 const bufSize = 1 << 20
 
 func TestModuleInfo(t *testing.T) {
-	Version = "0.1.3"
+	Version = ""
 	m, err := NewModule(Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -32,8 +34,8 @@ func TestModuleInfo(t *testing.T) {
 	if info.ID == "" {
 		t.Error("module ID must not be empty")
 	}
-	if info.Version != "0.1.3" {
-		t.Errorf("version = %q want 0.1.3", info.Version)
+	if info.Version != modulesdk.ManifestVersion(manifest.ManifestJSON) {
+		t.Errorf("version = %q want manifest version", info.Version)
 	}
 	if info.MinCoreVersion == "" {
 		t.Error("MinCoreVersion must not be empty")

@@ -95,7 +95,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:           m.id,
 		Name:         "Distributed Lock SQLite",
-		Version:      Version,
+		Version:      moduleVersion(),
 		Roles:        []string{"infrastructure"},
 		Description:  "SQLite-backed lock provider (single-node; see COMPATIBILITY for shared-volume limits)",
 		Author:       "MuxCore",
